@@ -16,6 +16,6 @@ echo "Running pylint.."
 pylint $(git ls-files '*.py')
 
 echo "Running tests.."
-pytest "$repository_path"
+python3 -m pytest "$repository_path"
 
 exit 0

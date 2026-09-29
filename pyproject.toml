@@ -29,6 +29,7 @@ profile = "black"
         "missing-class-docstring",
         "missing-function-docstring",
         "missing-module-docstring",
+        "missing-timeout", # mavlink2resthelper's requests calls predate this check
         "no-member", # Some members are created in runtime, pylint fails to detect such cases
         "no-name-in-module", # Names can be generated in runtime
         "protected-access", # Necessary for internal tests
