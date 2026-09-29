@@ -10,17 +10,29 @@ import threading
 import time
 from enum import Enum
 from select import select
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 from blueoshelper import request
 from dvlfinder import find_the_dvl
 from mavlink2resthelper import GPS_GLOBAL_ORIGIN_ID, Mavlink2RestHelper
+from mount import (
+    DOWN_PITCH_DEG,
+    FORWARD_PITCH_DEG,
+    MountAngles,
+    MountAngleSource,
+    MountRotation,
+    validate_angle_deg,
+)
 
 HOSTNAME = "waterlinked-dvl.local"
+# Orientation presets, kept for the /orientation endpoint and old settings files.
+# They map to mount_pitch_deg (see mount.py for the sign convention).
+DVL_CUSTOM = 0
 DVL_DOWN = 1
 DVL_FORWARD = 2
+ORIENTATION_PRESETS_PITCH_DEG = {DVL_DOWN: DOWN_PITCH_DEG, DVL_FORWARD: FORWARD_PITCH_DEG}
 LATLON_TO_CM = 1.1131884502145034e5
 
 
@@ -49,7 +61,14 @@ class DvlDriver(threading.Thread):
     mav = Mavlink2RestHelper()
     socket = None
     port = 16171  # Water Linked mentioned they won't allow changing or disabling this
-    orientation = DVL_DOWN
+    # DVL mounting rotation relative to the vehicle frame, in degrees.
+    # Positive pitch = DVL tilted nose-up relative to the frame (0 = DOWN, 90 = FORWARD),
+    # positive roll = DVL rolled right side down. See mount.py.
+    mount_pitch_deg = DOWN_PITCH_DEG
+    mount_roll_deg = 0.0
+    # Optional live source of mounting angles (e.g. a gimbal). When None the fixed
+    # mount_pitch_deg/mount_roll_deg settings are used.
+    mount_angle_source: Optional[MountAngleSource] = None
     enabled = True
     rangefinder = True
     hostname = HOSTNAME
@@ -57,7 +76,8 @@ class DvlDriver(threading.Thread):
     origin = [0, 0]
     saved_settings = [
         "enabled",
-        "orientation",
+        "mount_pitch_deg",
+        "mount_roll_deg",
         "hostname",
         "origin",
         "rangefinder",
@@ -74,7 +94,8 @@ class DvlDriver(threading.Thread):
 
     def __init__(self, orientation=DVL_DOWN) -> None:
         threading.Thread.__init__(self)
-        self.orientation = orientation
+        self.mount_pitch_deg = ORIENTATION_PRESETS_PITCH_DEG[orientation]
+        self.mount_roll_deg = 0.0
         # used for calculating attitude delta
         self.last_attitude = (0, 0, 0)
         self.current_attitude = (0, 0, 0)
@@ -96,6 +117,16 @@ class DvlDriver(threading.Thread):
                     else:
                         default = getattr(self, setting_name)
                         logger.warning(f"key not found: {setting_name} - keeping {default=} instead:")
+                # Settings files from before mount_pitch_deg existed only have the orientation preset
+                if "mount_pitch_deg" not in data and data.get("orientation") in ORIENTATION_PRESETS_PITCH_DEG:
+                    self.mount_pitch_deg = ORIENTATION_PRESETS_PITCH_DEG[data["orientation"]]
+                    logger.info(f"Migrated orientation={data['orientation']} to {self.mount_pitch_deg=}")
+                for setting_name in ("mount_pitch_deg", "mount_roll_deg"):
+                    try:
+                        setattr(self, setting_name, validate_angle_deg(getattr(self, setting_name)))
+                    except (TypeError, ValueError) as e:
+                        logger.warning(f"Invalid {setting_name} in settings ({e}), using 0 instead")
+                        setattr(self, setting_name, 0.0)
                 logger.debug("Loaded settings: ", data)
         except FileNotFoundError:
             logger.warning("Settings file not found, using default.")
@@ -127,7 +158,7 @@ class DvlDriver(threading.Thread):
         """
         Returns a dict with the current status
         """
-        return {"status": self.status, **self.current_settings}
+        return {"status": self.status, "orientation": self.orientation, **self.current_settings}
 
     @property
     def host(self) -> str:
@@ -174,15 +205,57 @@ class DvlDriver(threading.Thread):
         while not self.mav.get("/HEARTBEAT"):
             time.sleep(1)
 
+    @property
+    def orientation(self) -> int:
+        """
+        The orientation preset matching the current mounting angles, or DVL_CUSTOM
+        """
+        for preset, pitch in ORIENTATION_PRESETS_PITCH_DEG.items():
+            if (self.mount_pitch_deg, self.mount_roll_deg) == (pitch, 0.0):
+                return preset
+        return DVL_CUSTOM
+
     def set_orientation(self, orientation: int) -> bool:
         """
-        Sets the DVL orientation, either DVL_FORWARD of DVL_DOWN
+        Applies an orientation preset: DVL_DOWN (pitch 0 deg) or DVL_FORWARD (pitch 90 deg), roll 0 deg
         """
-        if orientation in [DVL_FORWARD, DVL_DOWN]:
-            self.orientation = orientation
-            self.save_settings()
-            return True
-        return False
+        if orientation not in ORIENTATION_PRESETS_PITCH_DEG:
+            return False
+        return self.set_mount_angles(ORIENTATION_PRESETS_PITCH_DEG[orientation], 0.0)
+
+    def set_mount_angles(self, pitch_deg: Optional[float] = None, roll_deg: Optional[float] = None) -> bool:
+        """
+        Sets the fixed mounting angles in degrees, leaving any angle passed as None unchanged.
+        Positive pitch = DVL tilted nose-up relative to the frame, positive roll = right side down.
+        """
+        try:
+            pitch = self.mount_pitch_deg if pitch_deg is None else validate_angle_deg(pitch_deg)
+            roll = self.mount_roll_deg if roll_deg is None else validate_angle_deg(roll_deg)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Rejected mounting angles: {e}")
+            return False
+        self.mount_pitch_deg = pitch
+        self.mount_roll_deg = roll
+        self.save_settings()
+        return True
+
+    def mount_angles_at(self, timestamp: float) -> MountAngles:
+        """
+        Mounting angles valid at timestamp (seconds). Uses the live source if one is attached,
+        otherwise the fixed angles from the settings.
+        """
+        if self.mount_angle_source is not None:
+            return self.mount_angle_source.angles_at(timestamp)
+        return MountAngles(self.mount_pitch_deg, self.mount_roll_deg)
+
+    @staticmethod
+    def measurement_timestamp(data: Dict[str, Any]) -> float:
+        """
+        Time (seconds since epoch) a DVL report is valid at, falling back to the reception time
+        """
+        if "time_of_validity" in data:
+            return data["time_of_validity"] * 1e-6
+        return time.time()
 
     def set_should_send(self, should_send):
         if not MessageType.contains(should_send):
@@ -364,9 +437,7 @@ class DvlDriver(threading.Thread):
             data["fom"],
         )
         dt = data["time"] / 1000
-        dx = dt * vx
-        dy = dt * vy
-        dz = dt * vz
+        rotation = MountRotation(self.mount_angles_at(self.measurement_timestamp(data)))
 
         # fom is the standard deviation. scaling it to a confidence from 0-100%
         # 0 is a very good measurement, 0.4 is considered a inaccurate measurement
@@ -378,25 +449,26 @@ class DvlDriver(threading.Thread):
             logger.info("Invalid  dvl reading, ignoring it.")
             return
 
+        # The rangefinder is sent as facing down, so report the distance along the vehicle's down axis.
+        # This is not sent when the DVL looks sideways or up (e.g. the FORWARD preset).
         if self.rangefinder and alt > 0.05:
-            self.mav.send_rangefinder(alt)
+            vertical_alt = rotation.range_to_vehicle_down(alt)
+            if vertical_alt > 0.05:
+                self.mav.send_rangefinder(vertical_alt)
 
-        position_delta = [0, 0, 0]
-        attitude_delta = [0, 0, 0]
+        velocity = rotation.rotate([vx, vy, vz])
         if self.should_send == MessageType.POSITION_DELTA:
-            dRoll, dPitch, dYaw = [
-                current_angle - last_angle
-                for (current_angle, last_angle) in zip(self.current_attitude, self.last_attitude)
-            ]
-            if self.orientation == DVL_DOWN:
-                position_delta = [dx, dy, dz]
-                attitude_delta = [dRoll, dPitch, dYaw]
-            elif self.orientation == DVL_FORWARD:
-                position_delta = [dz, dy, -dx]
-                attitude_delta = [dYaw, dPitch, -dRoll]
+            position_delta = [dt * v for v in velocity]
+            # Small attitude changes are treated as a rotation vector in the DVL frame.
+            # With a moving gimbal this also contains the gimbal's own motion over the interval.
+            attitude_delta = rotation.rotate(
+                [
+                    current_angle - last_angle
+                    for (current_angle, last_angle) in zip(self.current_attitude, self.last_attitude)
+                ]
+            )
             self.mav.send_vision(position_delta, attitude_delta, dt=data["time"] * 1e3, confidence=confidence)
         elif self.should_send == MessageType.SPEED_ESTIMATE:
-            velocity = [vx, vy, vz] if self.orientation == DVL_DOWN else [vz, vy, -vx]  # DVL_FORWARD
             self.mav.send_vision_speed_estimate(velocity)
 
         self.last_attitude = self.current_attitude

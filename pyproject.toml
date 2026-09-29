@@ -43,3 +43,7 @@ profile = "black"
 
     [tool.pylint.miscellaneous]
     notes = [ "FIXME" ] # TODO is removed for internal development
+
+[tool.pytest.ini_options]
+pythonpath = ["dvl-a50"]
+testpaths = ["dvl-a50/tests"]

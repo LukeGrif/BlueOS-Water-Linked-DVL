@@ -15,4 +15,7 @@ black --check --diff "$repository_path"
 echo "Running pylint.."
 pylint $(git ls-files '*.py')
 
+echo "Running tests.."
+pytest "$repository_path"
+
 exit 0

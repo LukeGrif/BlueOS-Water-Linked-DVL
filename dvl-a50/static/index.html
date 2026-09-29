@@ -44,6 +44,24 @@
 							<v-switch v-model="this.rangefinder" inset :label="`Send range data through MAVLink`" @change="setDvlAsRangefinder($event)"></v-switch>
 							<v-btn id="btn-load-dvl" type="button" class="btn btn-primary" @click="loadParams('dvl');">Load parameters for DVL</v-btn>
 							<v-btn id="btn-load-dvl-gps" type="button" class="btn btn-primary" @click="loadParams('dvl_gps');">Load parameters for DVL+GPS</v-btn>
+							<h2>Mounting</h2>
+							<p>
+								Current: pitch {{ mountPitch }}&deg;, roll {{ mountRoll }}&deg;
+								({{ orientationName }})<br />
+								Positive pitch = DVL tilted nose-up relative to the vehicle (0&deg; = down, 90&deg; = forward).
+								Positive roll = DVL rolled right side down.
+							</p>
+							<v-row dense>
+								<v-col class="col-6">
+									<v-text-field label="Pitch (deg)" id="mount-pitch" type="number" dense v-model.number="newMountPitch"></v-text-field>
+								</v-col>
+								<v-col class="col-6">
+									<v-text-field label="Roll (deg)" id="mount-roll" type="number" dense v-model.number="newMountRoll"></v-text-field>
+								</v-col>
+							</v-row>
+							<v-btn id="btn-mount-apply" type="button" class="btn btn-primary" @click="setDvlMount(newMountPitch, newMountRoll);">Apply</v-btn>
+							<v-btn id="btn-mount-down" type="button" class="btn" @click="setDvlMount(0, 0);">Down</v-btn>
+							<v-btn id="btn-mount-forward" type="button" class="btn" @click="setDvlMount(90, 0);">Forward</v-btn>
 							<h2>Status</h2>
 							<div>
 								<textarea readonly style="width:100%;"
@@ -51,7 +69,7 @@
 							</div>
 						</v-card>
 					</v-col>
-					<!-- uncoomment this to have control of what kind of message is bein sent and to allow pointing the dvl forward-->
+					<!-- uncoomment this to have control of what kind of message is bein sent -->
 					<!--
 					<v-col>
 						<v-card height="200">
@@ -59,14 +77,6 @@
 							<v-radio-group v-model="this.messageToSend">
 								<v-radio v-for="msg in messageOptions" :key="msg" :label="`${msg}`" :value="msg" @change="setDvlMessage(msg)">
 								</v-radio>
-							</v-radio-group>
-						</v-card>
-					</v-col>
-					<v-col>
-						<v-card height="200">
-							<h2>Orientation:</h2>
-							<v-radio-group v-model="this.orientation">
-								<v-radio v-for="(item, key) in orientationOptions" :key="item" :label="key" :value="item" @change="setDvlOrientation(item)"></v-radio>
 							</v-radio-group>
 						</v-card>
 					</v-col>
@@ -120,6 +130,10 @@
 				status: "",
 				enabled: null,
 				orientation: null,
+				mountPitch: null,
+				mountRoll: null,
+				newMountPitch: null,
+				newMountRoll: null,
 				origin: [0, 0],
 				newLat: 0,
 				newLong: 0,
@@ -130,11 +144,17 @@
 				newHostname: null,
 				rovPosition: [],
 				messageOptions: ["POSITION_DELTA", "POSITION_ESTIMATE", "SPEED_ESTIMATE"],
-				orientationOptions: {
-					"Downwards (LED pointing forward)": 1,
-					"Forward (Experimental)": 2,
+				orientationNames: {
+					0: "custom",
+					1: "down preset, LED pointing forward",
+					2: "forward preset, experimental",
 				}
 			}
+		},
+		computed: {
+			orientationName() {
+				return this.orientationNames[this.orientation] || ""
+			},
 		},
 		methods: {
 			updateDvlStatus() {
@@ -145,6 +165,12 @@
 						this.status = data.status
 						this.enabled = data.enabled
 						this.orientation = data.orientation
+						this.mountPitch = data.mount_pitch_deg
+						this.mountRoll = data.mount_roll_deg
+						if (this.newMountPitch == null) {
+							this.newMountPitch = data.mount_pitch_deg
+							this.newMountRoll = data.mount_roll_deg
+						}
 						if (this.newLat == 0 && this.newLong == 0) {
 							this.newLat = data.origin[0]
 							this.newLong = data.origin[1]
@@ -243,12 +269,23 @@
 				request.send();
 			},
 
-			/* Sets dvl orientation (Down/Forward) */
-			setDvlOrientation(orientation) {
-				const request = new XMLHttpRequest();
-				request.timeout = 800;
-				request.open('GET', 'orientation/' + orientation, true);
-				request.send();
+			/* Sets the dvl mounting angles in degrees (Down = 0/0, Forward = 90/0) */
+			setDvlMount(pitch, roll) {
+				this.newMountPitch = pitch
+				this.newMountRoll = roll
+				const check = (response) => {
+					if (response.data !== "True") {
+						throw new Error("angles must be numbers in [-180, 180]")
+					}
+				}
+				axios.get('mount_pitch/' + pitch, { timeout: 800 })
+					.then(check)
+					.then(() => axios.get('mount_roll/' + roll, { timeout: 800 }))
+					.then(check)
+					.then(this.updateDvlStatus)
+					.catch((error) => {
+						this.status = `Unable to set mounting angles: ${error}`
+					})
 			},
 
 			/* Sets DVL hostname (usually waterlinked-dvl.local) */

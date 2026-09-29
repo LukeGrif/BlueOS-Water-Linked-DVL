@@ -22,8 +22,8 @@ class API:
 
     def get_status(self) -> str:
         """
-        Returns the driver status as a JSON containing the keys
-        status, orientation, hostname, and enabled
+        Returns the driver status as a JSON containing the status, the saved settings
+        (including mount_pitch_deg and mount_roll_deg) and the matching orientation preset
         """
         return json.dumps(self.dvl.get_status())
 
@@ -37,11 +37,31 @@ class API:
 
     def set_orientation(self, orientation: int) -> bool:
         """
-        Sets the DVL mounting orientation:
-        1 = Down
-        2 = Forward
+        Sets the DVL mounting orientation preset:
+        1 = Down (mount pitch 0 deg)
+        2 = Forward (mount pitch 90 deg)
         """
         return self.dvl.set_orientation(orientation)
+
+    def set_mount_pitch(self, pitch_deg: str) -> bool:
+        """
+        Sets the DVL mounting pitch in degrees, in [-180, 180].
+        Positive = DVL tilted nose-up relative to the vehicle frame
+        """
+        try:
+            return self.dvl.set_mount_angles(pitch_deg=float(pitch_deg))
+        except ValueError:
+            return False
+
+    def set_mount_roll(self, roll_deg: str) -> bool:
+        """
+        Sets the DVL mounting roll in degrees, in [-180, 180].
+        Positive = DVL rolled right side down relative to the vehicle frame
+        """
+        try:
+            return self.dvl.set_mount_angles(roll_deg=float(roll_deg))
+        except ValueError:
+            return False
 
     def set_hostname(self, hostname: str) -> bool:
         """
@@ -98,6 +118,14 @@ if __name__ == "__main__":
     @app.route("/orientation/<int:orientation>")
     def set_orientation(orientation: int):
         return str(api.set_orientation(orientation))
+
+    @app.route("/mount_pitch/<pitch>")
+    def set_mount_pitch(pitch: str):
+        return str(api.set_mount_pitch(pitch))
+
+    @app.route("/mount_roll/<roll>")
+    def set_mount_roll(roll: str):
+        return str(api.set_mount_roll(roll))
 
     @app.route("/message_type/<messagetype>")
     def set_message_type(messagetype: str):
